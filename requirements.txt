@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-sqlalchemy==2.0.23
+sqlalchemy
 python-jose[cryptography]
 passlib[bcrypt]
 bcrypt
