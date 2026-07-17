@@ -8,5 +8,5 @@ python-multipart==0.0.6
 websockets==12.0
 python-dotenv==1.0.0
 alembic==1.12.1
-pydantic==2.5.0
+pydantic
 opencv-python>=4.8.0.0
