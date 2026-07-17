@@ -14,7 +14,17 @@ const state = {
     typingUsers: new Set(),
     typingTimeout: null,
     isTyping: false,
-    selectedFile: null
+    selectedFile: null,
+    
+    // WebRTC properties
+    peerConnection: null,
+    localStream: null,
+    remoteStream: null,
+    currentCall: null, // { status: 'idle'|'ringing'|'active', role: 'caller'|'callee', targetUserId: int, callType: 'video'|'audio' }
+    iceServers: [],
+    roomUsers: [],
+    bufferedIceCandidates: [],
+    pendingCallType: 'video'
 };
 
 // --- DOM ELEMENTS REFERENCE ---
@@ -63,6 +73,32 @@ const dom = {
     roomName: document.getElementById('room-name'),
     roomDesc: document.getElementById('room-desc'),
     roomLimit: document.getElementById('room-limit'),
+    
+    videoCallPanel: document.getElementById('video-call-panel'),
+    videoStream: document.getElementById('video-stream'),
+    videoCallBtn: document.getElementById('video-call-btn'),
+    endCallBtn: document.getElementById('end-call-btn'),
+    
+    // WebRTC Elements
+    webrtcVideoCallBtn: document.getElementById('webrtc-video-call-btn'),
+    webrtcAudioCallBtn: document.getElementById('webrtc-audio-call-btn'),
+    callSelectorModal: document.getElementById('call-selector-modal'),
+    closeCallSelectorBtn: document.getElementById('close-call-selector-btn'),
+    callUsersList: document.getElementById('call-users-list'),
+    incomingCallModal: document.getElementById('incoming-call-modal'),
+    callerName: document.getElementById('caller-name'),
+    callTypeLabel: document.getElementById('call-type-label'),
+    acceptCallBtn: document.getElementById('accept-call-btn'),
+    rejectCallBtn: document.getElementById('reject-call-btn'),
+    webrtcCallOverlay: document.getElementById('webrtc-call-overlay'),
+    remoteVideo: document.getElementById('remote-video'),
+    localVideo: document.getElementById('local-video'),
+    audioCallPlaceholder: document.getElementById('audio-call-placeholder'),
+    callStatusOverlay: document.getElementById('call-status-overlay'),
+    callStatusText: document.getElementById('call-status-text'),
+    toggleMicBtn: document.getElementById('toggle-mic-btn'),
+    toggleVideoBtn: document.getElementById('toggle-video-btn'),
+    hangupCallBtn: document.getElementById('hangup-call-btn'),
     
     toastContainer: document.getElementById('toast-container')
 };
@@ -145,6 +181,20 @@ function setupEventListeners() {
     // Message typing events
     dom.messageInput.addEventListener('input', handleTypingInput);
     dom.messageForm.addEventListener('submit', handleSendMessage);
+
+    // Video call actions
+    if (dom.videoCallBtn) dom.videoCallBtn.addEventListener('click', startVideoCall);
+    if (dom.endCallBtn) dom.endCallBtn.addEventListener('click', stopVideoCall);
+
+    // WebRTC Calling actions
+    dom.webrtcVideoCallBtn.addEventListener('click', () => openCallSelector('video'));
+    dom.webrtcAudioCallBtn.addEventListener('click', () => openCallSelector('audio'));
+    dom.closeCallSelectorBtn.addEventListener('click', () => dom.callSelectorModal.classList.remove('active'));
+    dom.acceptCallBtn.addEventListener('click', acceptIncomingCall);
+    dom.rejectCallBtn.addEventListener('click', rejectIncomingCall);
+    dom.hangupCallBtn.addEventListener('click', hangupCall);
+    dom.toggleMicBtn.addEventListener('click', toggleMuteMic);
+    dom.toggleVideoBtn.addEventListener('click', toggleMuteVideo);
 }
 
 async function handleLogin(e) {
@@ -210,6 +260,7 @@ async function handleRegister(e) {
 }
 
 function handleLogout() {
+    stopVideoCall();
     // Terminate WS connection
     if (state.ws) {
         state.ws.close();
@@ -235,6 +286,7 @@ async function initWorkspace() {
     dom.profileUsername.textContent = state.user.username;
     dom.userAvatar.textContent = state.user.username.charAt(0).toUpperCase();
     
+    fetchIceServers();
     await fetchRooms();
 }
 
@@ -324,6 +376,7 @@ async function handleCreateRoom(e) {
 
 // --- CHAT WORKSPACE & WEBSOCKET ENGINE ---
 async function selectRoom(room) {
+    stopVideoCall();
     // Set active style in sidebar
     document.querySelectorAll('.room-item').forEach(item => {
         item.classList.remove('active');
@@ -414,10 +467,47 @@ function handleIncomingWSMessage(data) {
         appendMessageToViewport(msg);
         scrollToBottom();
     } 
-    else if (data.type === 'user_joined' || data.type === 'user_left') {
+    else if (data.type === 'user_joined') {
         appendSystemMessage(data.message);
         scrollToBottom();
+        if (data.user_id !== state.user.id) {
+            if (!state.roomUsers.some(u => u.user_id === data.user_id)) {
+                state.roomUsers.push({ user_id: data.user_id, username: data.username });
+            }
+        }
     } 
+    else if (data.type === 'user_left') {
+        appendSystemMessage(data.message);
+        scrollToBottom();
+        state.roomUsers = state.roomUsers.filter(u => u.user_id !== data.user_id);
+    }
+    else if (data.type === 'room_users') {
+        state.roomUsers = data.users.filter(u => u.user_id !== state.user.id);
+    }
+    else if (data.type === 'call_invite') {
+        handleIncomingCallInvite(data);
+    }
+    else if (data.type === 'call_accept') {
+        handleCallAccepted(data);
+    }
+    else if (data.type === 'call_offer') {
+        handleIncomingCallOffer(data);
+    }
+    else if (data.type === 'call_answer') {
+        handleIncomingCallAnswer(data);
+    }
+    else if (data.type === 'ice_candidate') {
+        handleIncomingIceCandidate(data);
+    }
+    else if (data.type === 'call_reject') {
+        handleCallRejected(data);
+    }
+    else if (data.type === 'call_busy') {
+        handleCallBusy(data);
+    }
+    else if (data.type === 'call_end') {
+        handleCallEnded(data);
+    }
     else if (data.type === 'user_typing') {
         if (data.user_id !== state.user.id) {
             if (data.typing) {
@@ -684,3 +774,438 @@ function escapeHTML(str) {
         tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)
     );
 }
+
+// --- VIDEO CALL FLOWS ---
+function startVideoCall() {
+    if (!state.activeRoom) {
+        showToast('Please join a chat channel first.', 'error');
+        return;
+    }
+    
+    if (dom.videoCallPanel) dom.videoCallPanel.classList.add('active');
+    if (dom.videoCallBtn) dom.videoCallBtn.style.display = 'none';
+    
+    showToast('Initializing camera stream...', 'info');
+    if (dom.videoStream) dom.videoStream.src = `${API_URL}/kvm-stream/?t=${Date.now()}`;
+}
+
+function stopVideoCall() {
+    if (!dom.videoCallPanel) return;
+    const wasActive = dom.videoCallPanel.classList.contains('active');
+    
+    dom.videoCallPanel.classList.remove('active');
+    if (dom.videoCallBtn) dom.videoCallBtn.style.display = 'flex';
+    
+    if (dom.videoStream) dom.videoStream.src = '';
+    
+    if (wasActive) {
+        showToast('Video call ended.', 'info');
+    }
+}
+
+// --- WebRTC CALLING LOGIC ---
+
+async function fetchIceServers() {
+    try {
+        const response = await fetch(`${API_URL}/webrtc/ice-servers`, {
+            headers: { 'Authorization': `Bearer ${state.token}` }
+        });
+        if (response.ok) {
+            const data = await response.json();
+            state.iceServers = data.iceServers;
+            console.log('WebRTC ICE Servers cached:', state.iceServers);
+        } else {
+            state.iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
+        }
+    } catch (e) {
+        console.error('Failed to fetch ICE servers:', e);
+        state.iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
+    }
+}
+
+function openCallSelector(callType) {
+    if (!state.activeRoom) {
+        showToast('Please join a chat channel first.', 'error');
+        return;
+    }
+    state.pendingCallType = callType;
+    renderCallUsersList();
+    dom.callSelectorModal.classList.add('active');
+}
+
+function renderCallUsersList() {
+    dom.callUsersList.innerHTML = '';
+    
+    if (state.roomUsers.length === 0) {
+        dom.callUsersList.innerHTML = `
+            <div style="text-align: center; color: var(--text-secondary); padding: 20px;">
+                No other online users in this room
+            </div>
+        `;
+        return;
+    }
+    
+    state.roomUsers.forEach(user => {
+        const li = document.createElement('li');
+        li.className = 'room-item';
+        li.style.display = 'flex';
+        li.style.alignItems = 'center';
+        li.style.justifyContent = 'space-between';
+        
+        li.innerHTML = `
+            <div class="room-item-details" style="flex-direction: row; align-items: center; gap: 12px;">
+                <span class="status-indicator online"></span>
+                <span class="room-title" style="font-weight: 600; color: white;">${escapeHTML(user.username)}</span>
+            </div>
+            <button class="btn btn-primary" style="padding: 6px 12px; font-size: 0.8rem;">Call</button>
+        `;
+        
+        li.addEventListener('click', () => {
+            dom.callSelectorModal.classList.remove('active');
+            startCallFlow(user.user_id, state.pendingCallType);
+        });
+        
+        dom.callUsersList.appendChild(li);
+    });
+}
+
+function startCallFlow(targetUserId, callType) {
+    if (state.currentCall) {
+        showToast('You are already in an active call session.', 'error');
+        return;
+    }
+    
+    state.currentCall = {
+        status: 'ringing',
+        role: 'caller',
+        targetUserId: targetUserId,
+        callType: callType
+    };
+    
+    // Prepare Call Overlay
+    dom.callStatusText.textContent = 'Calling peer...';
+    dom.callStatusOverlay.classList.remove('hidden');
+    dom.webrtcCallOverlay.classList.add('active');
+    
+    // Show/hide elements based on callType
+    if (callType === 'audio') {
+        dom.localVideo.style.display = 'none';
+        dom.remoteVideo.style.display = 'none';
+        dom.audioCallPlaceholder.style.display = 'flex';
+    } else {
+        dom.localVideo.style.display = 'block';
+        dom.remoteVideo.style.display = 'block';
+        dom.audioCallPlaceholder.style.display = 'none';
+    }
+    
+    // Send invitation over WS
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(jsonStr({
+            type: 'call_invite',
+            target_user_id: targetUserId,
+            call_type: callType
+        }));
+    }
+    
+    console.log(`Initiated ${callType} call to user ${targetUserId}`);
+}
+
+function handleIncomingCallInvite(data) {
+    if (state.currentCall) {
+        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+            state.ws.send(jsonStr({
+                type: 'call_busy',
+                target_user_id: data.from_user_id
+            }));
+        }
+        return;
+    }
+    
+    state.currentCall = {
+        status: 'ringing',
+        role: 'callee',
+        targetUserId: data.from_user_id,
+        callerName: data.from_username,
+        callType: data.call_type
+    };
+    
+    dom.callerName.textContent = data.from_username;
+    dom.callTypeLabel.textContent = `is inviting you to a ${data.call_type} call...`;
+    dom.incomingCallModal.classList.add('active');
+}
+
+async function acceptIncomingCall() {
+    dom.incomingCallModal.classList.remove('active');
+    
+    if (!state.currentCall) return;
+    
+    state.currentCall.status = 'active';
+    dom.callStatusText.textContent = 'Connecting...';
+    dom.callStatusOverlay.classList.remove('hidden');
+    dom.webrtcCallOverlay.classList.add('active');
+    
+    // Show/hide elements based on callType
+    if (state.currentCall.callType === 'audio') {
+        dom.localVideo.style.display = 'none';
+        dom.remoteVideo.style.display = 'none';
+        dom.audioCallPlaceholder.style.display = 'flex';
+    } else {
+        dom.localVideo.style.display = 'block';
+        dom.remoteVideo.style.display = 'block';
+        dom.audioCallPlaceholder.style.display = 'none';
+    }
+    
+    // Send acceptance to signaling server
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(jsonStr({
+            type: 'call_accept',
+            target_user_id: state.currentCall.targetUserId
+        }));
+    }
+    
+    await initWebRTCPeer('callee', state.currentCall.targetUserId, state.currentCall.callType);
+}
+
+function rejectIncomingCall() {
+    dom.incomingCallModal.classList.remove('active');
+    if (!state.currentCall) return;
+    
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(jsonStr({
+            type: 'call_reject',
+            target_user_id: state.currentCall.targetUserId
+        }));
+    }
+    cleanupCall();
+}
+
+async function handleIncomingCallOffer(data) {
+    if (!state.currentCall || state.currentCall.role !== 'callee') return;
+    
+    console.log('Received SDP offer from peer');
+    
+    try {
+        await state.peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        
+        while (state.bufferedIceCandidates.length > 0) {
+            const candidate = state.bufferedIceCandidates.shift();
+            await state.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        }
+        
+        const answer = await state.peerConnection.createAnswer();
+        await state.peerConnection.setLocalDescription(answer);
+        
+        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+            state.ws.send(jsonStr({
+                type: 'call_answer',
+                target_user_id: state.currentCall.targetUserId,
+                sdp: answer
+            }));
+        }
+    } catch (e) {
+        console.error('Failed to handle incoming SDP offer:', e);
+        hangupCall();
+    }
+}
+
+async function handleIncomingCallAnswer(data) {
+    if (!state.currentCall || state.currentCall.role !== 'caller') return;
+    
+    console.log('Received SDP answer from peer');
+    
+    try {
+        await state.peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        
+        while (state.bufferedIceCandidates.length > 0) {
+            const candidate = state.bufferedIceCandidates.shift();
+            await state.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        }
+        
+        state.currentCall.status = 'active';
+    } catch (e) {
+        console.error('Failed to set remote SDP answer:', e);
+        hangupCall();
+    }
+}
+
+async function handleIncomingIceCandidate(data) {
+    if (!state.peerConnection) return;
+    
+    try {
+        if (state.peerConnection.remoteDescription) {
+            await state.peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+        } else {
+            state.bufferedIceCandidates.push(data.candidate);
+        }
+    } catch (e) {
+        console.error('Error adding ICE candidate:', e);
+    }
+}
+
+function handleCallRejected(data) {
+    showToast('Call was rejected by peer.', 'info');
+    cleanupCall();
+}
+
+function handleCallBusy(data) {
+    showToast('User is busy on another call.', 'info');
+    cleanupCall();
+}
+
+function handleCallEnded(data) {
+    showToast('Call ended by peer.', 'info');
+    cleanupCall();
+}
+
+async function initWebRTCPeer(role, targetUserId, callType) {
+    console.log(`Setting up peer connection as ${role} for ${callType} call`);
+    
+    state.bufferedIceCandidates = [];
+    
+    try {
+        const constraints = {
+            audio: true,
+            video: callType === 'video'
+        };
+        state.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+        
+        if (callType === 'video') {
+            dom.localVideo.srcObject = state.localStream;
+        }
+    } catch (e) {
+        console.error('Failed to acquire mic/camera permissions:', e);
+        showToast('Camera/Microphone access denied.', 'error');
+        hangupCall();
+        return;
+    }
+    
+    state.peerConnection = new RTCPeerConnection({ iceServers: state.iceServers });
+    
+    state.localStream.getTracks().forEach(track => {
+        state.peerConnection.addTrack(track, state.localStream);
+    });
+    
+    state.peerConnection.ontrack = (event) => {
+        console.log('Received remote media track');
+        state.remoteStream = event.streams[0];
+        if (callType === 'video') {
+            dom.remoteVideo.srcObject = state.remoteStream;
+        }
+        dom.callStatusOverlay.classList.add('hidden');
+    };
+    
+    state.peerConnection.onicecandidate = (event) => {
+        if (event.candidate && state.ws && state.ws.readyState === WebSocket.OPEN) {
+            state.ws.send(jsonStr({
+                type: 'ice_candidate',
+                target_user_id: targetUserId,
+                candidate: event.candidate
+            }));
+        }
+    };
+    
+    state.peerConnection.oniceconnectionstatechange = () => {
+        console.log('ICE Connection State changed to:', state.peerConnection.iceConnectionState);
+        if (state.peerConnection.iceConnectionState === 'disconnected' || 
+            state.peerConnection.iceConnectionState === 'failed') {
+            showToast('ICE Connection failed, closing call', 'error');
+            cleanupCall();
+        }
+    };
+    
+    if (role === 'caller') {
+        try {
+            const offer = await state.peerConnection.createOffer();
+            await state.peerConnection.setLocalDescription(offer);
+            
+            if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+                state.ws.send(jsonStr({
+                    type: 'call_offer',
+                    target_user_id: targetUserId,
+                    sdp: offer
+                }));
+            }
+        } catch (e) {
+            console.error('Error creating local offer description:', e);
+            hangupCall();
+        }
+    }
+}
+
+function hangupCall() {
+    if (!state.currentCall) return;
+    
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(jsonStr({
+            type: 'call_end',
+            target_user_id: state.currentCall.targetUserId
+        }));
+    }
+    cleanupCall();
+}
+
+function cleanupCall() {
+    state.currentCall = null;
+    
+    if (state.peerConnection) {
+        state.peerConnection.close();
+        state.peerConnection = null;
+    }
+    
+    if (state.localStream) {
+        state.localStream.getTracks().forEach(track => track.stop());
+        state.localStream = null;
+    }
+    
+    state.remoteStream = null;
+    state.bufferedIceCandidates = [];
+    
+    dom.localVideo.srcObject = null;
+    dom.remoteVideo.srcObject = null;
+    
+    dom.webrtcCallOverlay.classList.remove('active');
+    dom.incomingCallModal.classList.remove('active');
+    dom.callSelectorModal.classList.remove('active');
+    dom.callStatusOverlay.classList.remove('hidden');
+    
+    dom.toggleMicBtn.classList.remove('muted');
+    dom.toggleVideoBtn.classList.remove('muted');
+}
+
+function toggleMuteMic() {
+    if (!state.localStream) return;
+    
+    const audioTrack = state.localStream.getAudioTracks()[0];
+    if (audioTrack) {
+        audioTrack.enabled = !audioTrack.enabled;
+        dom.toggleMicBtn.classList.toggle('muted', !audioTrack.enabled);
+        showToast(audioTrack.enabled ? 'Microphone unmuted' : 'Microphone muted', 'info');
+    }
+}
+
+function toggleMuteVideo() {
+    if (!state.localStream || !state.currentCall || state.currentCall.callType !== 'video') return;
+    
+    const videoTrack = state.localStream.getVideoTracks()[0];
+    if (videoTrack) {
+        videoTrack.enabled = !videoTrack.enabled;
+        dom.toggleVideoBtn.classList.toggle('muted', !videoTrack.enabled);
+        showToast(videoTrack.enabled ? 'Camera turned on' : 'Camera turned off', 'info');
+    }
+}
+
+async function handleCallAccepted(data) {
+    if (!state.currentCall || state.currentCall.role !== 'caller') return;
+    
+    console.log('Call invite accepted by peer');
+    state.currentCall.status = 'active';
+    dom.callStatusText.textContent = 'Connecting...';
+    
+    await initWebRTCPeer('caller', state.currentCall.targetUserId, state.currentCall.callType);
+}
+
+function jsonStr(obj) {
+    return JSON.stringify(obj);
+}
+
+
