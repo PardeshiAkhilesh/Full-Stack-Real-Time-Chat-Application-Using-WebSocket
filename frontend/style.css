@@ -954,23 +954,94 @@ input::placeholder, textarea::placeholder {
     }
 }
 
-/* --- VIDEO CALLING STYLES --- */
+/* --- VIDEO CALLING & KVM STREAM STYLES --- */
 .video-call-panel {
     height: 0;
     overflow: hidden;
     transition: height var(--transition-smooth), padding var(--transition-smooth);
-    background: rgba(14, 18, 29, 0.6);
+    background: rgba(10, 12, 22, 0.85);
     border-bottom: 0px solid rgba(255, 255, 255, 0.06);
     display: flex;
     flex-direction: column;
     position: relative;
     box-sizing: border-box;
+    z-index: 15;
 }
 
 .video-call-panel.active {
-    height: 380px;
+    height: 460px;
     padding: 16px 24px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.stream-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.stream-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.stream-title h3 {
+    margin: 0;
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: hsl(var(--text-primary));
+}
+
+.pulse-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: hsl(var(--accent-cyan));
+    box-shadow: 0 0 8px hsl(var(--accent-cyan));
+    animation: streamPulse 2s infinite ease-in-out;
+}
+
+@keyframes streamPulse {
+    0% { transform: scale(0.95); opacity: 0.6; }
+    50% { transform: scale(1.15); opacity: 1; box-shadow: 0 0 14px hsl(var(--accent-cyan)); }
+    100% { transform: scale(0.95); opacity: 0.6; }
+}
+
+.stream-tabs {
+    display: flex;
+    background: rgba(255, 255, 255, 0.04);
+    padding: 3px;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.stream-tab-btn {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: hsl(var(--text-muted));
+    font-family: var(--font-sans);
+    font-size: 0.725rem;
+    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.stream-tab-btn:hover {
+    color: hsl(var(--text-secondary));
+}
+
+.stream-tab-btn.active {
+    background: rgba(255, 255, 255, 0.08);
+    color: white;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
 .video-container {
@@ -978,18 +1049,58 @@ input::placeholder, textarea::placeholder {
     position: relative;
     border-radius: var(--radius-md);
     overflow: hidden;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: #000;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    background: #030508;
     display: flex;
     justify-content: center;
     align-items: center;
     height: 100%;
 }
 
-#video-stream {
+.stream-view-container {
+    display: none;
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    position: relative;
+    justify-content: center;
+    align-items: center;
+}
+
+.stream-view-container.active {
+    display: flex;
+}
+
+#kvm-container {
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    border-radius: var(--radius-sm);
+}
+
+.mjpeg-stream-img {
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+}
+
+.stream-fallback {
+    display: none;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #030508;
+    z-index: 10;
+}
+
+.stream-fallback.active {
+    display: block;
 }
 
 .video-controls {

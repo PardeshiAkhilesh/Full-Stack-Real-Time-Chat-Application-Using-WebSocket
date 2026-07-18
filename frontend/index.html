@@ -142,6 +142,13 @@
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
                                 <span>100 limit</span>
                             </span>
+                            <button class="btn-icon" id="video-call-btn" title="Live Feed (Camera/KVM)">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                                    <line x1="8" y1="21" x2="16" y2="21"></line>
+                                    <line x1="12" y1="17" x2="12" y2="21"></line>
+                                </svg>
+                            </button>
                             <button class="btn-icon" id="webrtc-video-call-btn" title="Start Video Call">
                                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                     <path d="M23 7l-7 5 7 5V7z"></path>
@@ -156,17 +163,39 @@
                         </div>
                     </header>
 
-                    <!-- Video Call Panel -->
+                    <!-- Dual-Mode Video / KVM Stream Panel -->
                     <div id="video-call-panel" class="video-call-panel">
+                        <div class="stream-panel-header">
+                            <div class="stream-title">
+                                <span class="pulse-indicator online"></span>
+                                <h3>LIVE FEED WORKSPACE</h3>
+                            </div>
+                            <div class="stream-tabs">
+                                <button class="stream-tab-btn active" id="tab-canvas-btn">Low-Latency KVM</button>
+                                <button class="stream-tab-btn" id="tab-mjpeg-btn">MJPEG Camera Feed</button>
+                            </div>
+                        </div>
+                        
                         <div class="video-container">
-                            <img id="video-stream" src="" alt="Video Call Stream">
+                            <!-- Tab Content 1: Canvas H264 stream -->
+                            <div id="canvas-stream-container" class="stream-view-container active">
+                                <canvas id="kvm-container" width="1020" height="720"></canvas>
+                                <img id="canvas-fallback-img" class="stream-fallback active" src="./backend_not_connected.svg" alt="Canvas Stream Not Connected">
+                            </div>
+
+                            <!-- Tab Content 2: MJPEG Image stream -->
+                            <div id="mjpeg-stream-container" class="stream-view-container">
+                                <img id="video-stream" class="mjpeg-stream-img" src="" alt="Camera Stream">
+                                <img id="mjpeg-fallback-img" class="stream-fallback active" src="./backend_not_connected.svg" alt="Camera Stream Not Connected">
+                            </div>
+
                             <div class="video-controls">
                                 <button id="end-call-btn" class="btn btn-danger">
                                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-5.85-5.85A19.76 19.76 0 0 1 2.07 3.9 2 2 0 0 1 4 1.72h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8 9.65a16 16 0 0 0 2.68 3.66z"></path>
-                                        <line x1="23" y1="1" x2="1" y2="23"></line>
+                                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                                        <line x1="6" y1="6" x2="18" y2="18"></line>
                                     </svg>
-                                    <span>End Call</span>
+                                    <span>Close Feed</span>
                                 </button>
                             </div>
                         </div>

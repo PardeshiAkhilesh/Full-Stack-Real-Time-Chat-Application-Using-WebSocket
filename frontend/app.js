@@ -24,7 +24,13 @@ const state = {
     iceServers: [],
     roomUsers: [],
     bufferedIceCandidates: [],
-    pendingCallType: 'video'
+    pendingCallType: 'video',
+
+    // Dual-Mode KVM & Camera streaming properties
+    kvmSocket: null,
+    decoderWorker: null,
+    streamMode: 'canvas', // 'canvas' | 'mjpeg'
+    kvmContext: null
 };
 
 // --- DOM ELEMENTS REFERENCE ---
@@ -99,8 +105,16 @@ const dom = {
     toggleMicBtn: document.getElementById('toggle-mic-btn'),
     toggleVideoBtn: document.getElementById('toggle-video-btn'),
     hangupCallBtn: document.getElementById('hangup-call-btn'),
-    
-    toastContainer: document.getElementById('toast-container')
+    toastContainer: document.getElementById('toast-container'),
+
+    // KVM & Dual-Stream Elements
+    kvmContainer: document.getElementById('kvm-container'),
+    canvasFallbackImg: document.getElementById('canvas-fallback-img'),
+    mjpegFallbackImg: document.getElementById('mjpeg-fallback-img'),
+    tabCanvasBtn: document.getElementById('tab-canvas-btn'),
+    tabMjpegBtn: document.getElementById('tab-mjpeg-btn'),
+    canvasStreamContainer: document.getElementById('canvas-stream-container'),
+    mjpegStreamContainer: document.getElementById('mjpeg-stream-container')
 };
 
 // --- INITIALIZATION ---
@@ -185,6 +199,10 @@ function setupEventListeners() {
     // Video call actions
     if (dom.videoCallBtn) dom.videoCallBtn.addEventListener('click', startVideoCall);
     if (dom.endCallBtn) dom.endCallBtn.addEventListener('click', stopVideoCall);
+
+    // KVM / Camera Feed Tab Selectors
+    if (dom.tabCanvasBtn) dom.tabCanvasBtn.addEventListener('click', () => switchStreamMode('canvas'));
+    if (dom.tabMjpegBtn) dom.tabMjpegBtn.addEventListener('click', () => switchStreamMode('mjpeg'));
 
     // WebRTC Calling actions
     dom.webrtcVideoCallBtn.addEventListener('click', () => openCallSelector('video'));
@@ -775,7 +793,8 @@ function escapeHTML(str) {
     );
 }
 
-// --- VIDEO CALL FLOWS ---
+// --- VIDEO & KVM DUAL-STREAMING FLOWS ---
+
 function startVideoCall() {
     if (!state.activeRoom) {
         showToast('Please join a chat channel first.', 'error');
@@ -785,8 +804,15 @@ function startVideoCall() {
     if (dom.videoCallPanel) dom.videoCallPanel.classList.add('active');
     if (dom.videoCallBtn) dom.videoCallBtn.style.display = 'none';
     
-    showToast('Initializing camera stream...', 'info');
-    if (dom.videoStream) dom.videoStream.src = `${API_URL}/kvm-stream/?t=${Date.now()}`;
+    showToast('Initializing stream feeds...', 'info');
+    
+    // Initialize the Canvas 2D context
+    if (dom.kvmContainer && !state.kvmContext) {
+        state.kvmContext = dom.kvmContainer.getContext('2d');
+    }
+    
+    // Start active mode
+    switchStreamMode(state.streamMode || 'canvas');
 }
 
 function stopVideoCall() {
@@ -796,11 +822,161 @@ function stopVideoCall() {
     dom.videoCallPanel.classList.remove('active');
     if (dom.videoCallBtn) dom.videoCallBtn.style.display = 'flex';
     
-    if (dom.videoStream) dom.videoStream.src = '';
+    // Stop MJPEG
+    if (dom.videoStream) {
+        dom.videoStream.src = '';
+        dom.videoStream.onload = null;
+        dom.videoStream.onerror = null;
+    }
+    if (dom.mjpegFallbackImg) dom.mjpegFallbackImg.classList.add('active');
+    
+    // Stop Canvas/Webcodecs H264 websocket & worker
+    stopCanvasStream();
     
     if (wasActive) {
-        showToast('Video call ended.', 'info');
+        showToast('Live feed stream closed.', 'info');
     }
+}
+
+function switchStreamMode(mode) {
+    state.streamMode = mode;
+    
+    // UI active classes
+    if (mode === 'canvas') {
+        if (dom.tabCanvasBtn) dom.tabCanvasBtn.classList.add('active');
+        if (dom.tabMjpegBtn) dom.tabMjpegBtn.classList.remove('active');
+        if (dom.canvasStreamContainer) dom.canvasStreamContainer.classList.add('active');
+        if (dom.mjpegStreamContainer) dom.mjpegStreamContainer.classList.remove('active');
+        
+        // Stop MJPEG, Start WebSockets Canvas
+        if (dom.videoStream) dom.videoStream.src = '';
+        if (dom.mjpegFallbackImg) dom.mjpegFallbackImg.classList.add('active');
+        
+        startCanvasStream();
+    } else {
+        if (dom.tabCanvasBtn) dom.tabCanvasBtn.classList.remove('active');
+        if (dom.tabMjpegBtn) dom.tabMjpegBtn.classList.add('active');
+        if (dom.canvasStreamContainer) dom.canvasStreamContainer.classList.remove('active');
+        if (dom.mjpegStreamContainer) dom.mjpegStreamContainer.classList.add('active');
+        
+        // Stop WebSockets Canvas, Start MJPEG
+        stopCanvasStream();
+        
+        startMjpegStream();
+    }
+}
+
+function startMjpegStream() {
+    if (!dom.videoStream) return;
+    
+    if (dom.mjpegFallbackImg) dom.mjpegFallbackImg.classList.remove('active');
+    dom.videoStream.onload = () => {
+        if (dom.mjpegFallbackImg) dom.mjpegFallbackImg.classList.remove('active');
+    };
+    dom.videoStream.onerror = () => {
+        if (dom.mjpegFallbackImg) dom.mjpegFallbackImg.classList.add('active');
+        showToast('Failed to load camera feed. Reverting to fallback.', 'error');
+    };
+    
+    dom.videoStream.src = `${API_URL}/kvm-stream/?t=${Date.now()}`;
+}
+
+function startCanvasStream() {
+    stopCanvasStream(); // Clean up first if active
+    
+    // Start Web Worker
+    try {
+        state.decoderWorker = new Worker('videoFrameDecoderWorker.js');
+        state.decoderWorker.postMessage({ type: 'init' });
+        
+        state.decoderWorker.onmessage = (event) => {
+            const msg = event.data;
+            if (msg.type === 'frame') {
+                renderKvmFrame(msg.frame);
+            } else if (msg.type === 'log') {
+                console.log('[Decoder Worker]', msg.message);
+            }
+        };
+    } catch (e) {
+        console.error('Failed to create Web Worker:', e);
+        showToast('WebCodecs Worker initialization failed.', 'error');
+        return;
+    }
+    
+    // Start WebSocket Stream
+    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const kvmUrl = `${wsProto}//${BASE_HOST}/websocket/kvm-stream`;
+    
+    try {
+        state.kvmSocket = new WebSocket(kvmUrl);
+        state.kvmSocket.binaryType = 'arraybuffer';
+        
+        state.kvmSocket.onopen = () => {
+            if (dom.canvasFallbackImg) dom.canvasFallbackImg.classList.remove('active');
+            showToast('KVM Stream WebSocket connected.', 'success');
+        };
+        
+        state.kvmSocket.onmessage = (event) => {
+            if (state.decoderWorker) {
+                // Post encoded video chunk buffer directly to worker
+                state.decoderWorker.postMessage(
+                    { data: event.data, type: 'videoData' },
+                    [event.data]
+                );
+            }
+        };
+        
+        state.kvmSocket.onerror = (e) => {
+            console.error('KVM WebSocket error:', e);
+            if (dom.canvasFallbackImg) dom.canvasFallbackImg.classList.add('active');
+        };
+        
+        state.kvmSocket.onclose = () => {
+            console.log('KVM WebSocket connection closed.');
+            if (dom.canvasFallbackImg) dom.canvasFallbackImg.classList.add('active');
+        };
+    } catch (e) {
+        console.error('WebSocket connection error:', e);
+        if (dom.canvasFallbackImg) dom.canvasFallbackImg.classList.add('active');
+    }
+}
+
+function stopCanvasStream() {
+    if (state.kvmSocket) {
+        if (state.kvmSocket.readyState === WebSocket.OPEN) {
+            state.kvmSocket.close();
+        }
+        state.kvmSocket = null;
+    }
+    
+    if (state.decoderWorker) {
+        state.decoderWorker.terminate();
+        state.decoderWorker = null;
+    }
+    
+    if (dom.canvasFallbackImg) dom.canvasFallbackImg.classList.add('active');
+    
+    // Clear Canvas
+    if (state.kvmContext && dom.kvmContainer) {
+        state.kvmContext.clearRect(0, 0, dom.kvmContainer.width, dom.kvmContainer.height);
+    }
+}
+
+function renderKvmFrame(frame) {
+    if (!state.kvmContext || !dom.kvmContainer) {
+        frame.close();
+        return;
+    }
+    
+    // Draw the VideoFrame to canvas
+    state.kvmContext.drawImage(
+        frame,
+        0, 0, frame.displayWidth, frame.displayHeight, // source rectangle
+        0, 0, dom.kvmContainer.width, dom.kvmContainer.height // destination rectangle
+    );
+    
+    // Close the frame to free GPU memory
+    frame.close();
 }
 
 // --- WebRTC CALLING LOGIC ---
